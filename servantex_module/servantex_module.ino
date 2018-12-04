@@ -37,10 +37,12 @@
 #define ON_HIGH           1
 #define OFF_LOW           2
 
-int pinStatus[MAX_GPIO];
-int pinRefs[MAX_GPIO];
 const int PINMODE_STACK_SIZE = JSON_ARRAY_SIZE(13) + JSON_OBJECT_SIZE(1) + 13*JSON_OBJECT_SIZE(3) + 220;
 const int SYNC_STACK_SIZE    = JSON_ARRAY_SIZE(13) + JSON_OBJECT_SIZE(1) + 13*JSON_OBJECT_SIZE(3) + 220;
+
+int pinStatus[MAX_GPIO];
+int pinRefs[MAX_GPIO];
+bool inputs[MAX_GPIO];
 
 ESP8266WiFiMulti WiFiMulti;
 
@@ -126,11 +128,35 @@ int httpRequestJson(String relativeUrl, int isPost, String payload, int stackSiz
 void syncPinStates() {
   JsonObject *root;
 
-  int httpCode = httpRequestJson(SYNC_URL, 1, "", SYNC_STACK_SIZE, root);
+  String payload = "";
+
+  int i;
+  for (i = 0; i < MAX_GPIO; i++) {
+    payload += "pin" + String(i) + "=" + String(pinStatus[i]);
+
+    if(i + 1 < MAX_GPIO)
+      payload += "&";
+  }
+
+  int httpCode = httpRequestJson(SYNC_URL, 1, payload, SYNC_STACK_SIZE, root);
 
   if(httpCode != 200 || !(*root).success()) {
     debug("Error parsing json in sync");
     return;
+  }
+
+  JsonArray& pinStatuses = (*root)["status"];
+
+  for (i = 0; i < sizeof(pinStatuses); i++) {
+    JsonObject& pin = pinStatuses[i];
+
+    int pinNumber = pin["p"];
+    int srvStatus = pin["s"];
+
+    if (pinStatus[i] - 1 != srvStatus) {
+      // A change has been made from server
+      setPin(i, srvStatus);
+    }
   }
 }
 
@@ -160,6 +186,7 @@ void syncPinModes() {
       }
       else if (pin["m"] == 2) {
         pinMode(pinNumber, INPUT);
+        inputs[pinNumber] = true;
 
         if(pin.containsKey("r")) {
           int r = pin["r"];
@@ -194,13 +221,16 @@ void loop() {
 
   int i;
   for (i = 0; i < MAX_GPIO; i++) {
-    if (pinRefs[i] != -1) {
+    if(inputs[i]) {
       int newStatus = readPin(i);
-      if(pinStatus[i] != newStatus + 1) {
-        // Status changed!
-        setPin(pinRefs[i], 255 - newStatus);
-        pinStatus[i] = newStatus + 1;
+      if (pinRefs[i] != -1) {
+        if(pinStatus[i] != newStatus + 1) {
+          // Status changed!
+          int lastRefPinState = pinStatus[pinRefs[i]];
+          setPin(pinRefs[i], 255 - lastRefPinState + 1);
+        }
       }
+      pinStatus[i] = newStatus + 1;
     }
   }
 
