@@ -31,8 +31,14 @@
 
 #define FW_VERSION        "0.0.1"
 #define MAX_GPIO          13
+#define LOOP_DELAY        50
+#define SYNC_DELAY        1500
+#define NOT_SET           0
+#define ON_HIGH           1
+#define OFF_LOW           2
 
 int pinStatus[MAX_GPIO];
+int pinRefs[MAX_GPIO];
 const int PINMODE_STACK_SIZE = JSON_ARRAY_SIZE(13) + JSON_OBJECT_SIZE(1) + 13*JSON_OBJECT_SIZE(3) + 220;
 const int SYNC_STACK_SIZE    = JSON_ARRAY_SIZE(13) + JSON_OBJECT_SIZE(1) + 13*JSON_OBJECT_SIZE(3) + 220;
 
@@ -41,6 +47,8 @@ ESP8266WiFiMulti WiFiMulti;
 void syncPinModes();
 void syncPinStates();
 void debug(String);
+void setPin(int, int);
+int readPin(int);
 
 void setup() {
 
@@ -141,12 +149,25 @@ void syncPinModes() {
   int i;
   for(i = 0; i < sizeof(pins); i++) {
     JsonObject& pin = pins[i];
+    int pinNumber = pin["p"];
+    if(pinNumber < MAX_GPIO) {
+      if (pin["m"] == 1) {
+        pinMode(pinNumber, OUTPUT);
 
-    if(pin["p"] < MAX_GPIO) {
-      if (pin["m"] == 1)
-        pinMode(pin["p"], OUTPUT); 
-      else if (pin["m"] == 2)
-        pinMode(pin["p"], INPUT);
+        if(pinStatus[pinNumber] == NOT_SET) {
+          setPin(pin["p"], pin["v"]);
+        }
+      }
+      else if (pin["m"] == 2) {
+        pinMode(pinNumber, INPUT);
+
+        if(pin.containsKey("r")) {
+          int r = pin["r"];
+          pinRefs[pinNumber] = r;
+        } else {
+          pinRefs[pinNumber] = -1;
+        }
+      }
     } else {
       debug("GPIO pin Does not exist");
     }
@@ -154,21 +175,37 @@ void syncPinModes() {
 }
 
 int counter = 0;
+int wait = 0;
 void loop() {
   // wait for WiFi connection
-  if ((WiFiMulti.run() == WL_CONNECTED)) {
-    counter++;
-
-    if(counter > 10) {
-      syncPinModes();
-      delay(1000);
+  if(wait >= SYNC_DELAY) {
+    wait = 0; // Reset wait
+    if ((WiFiMulti.run() == WL_CONNECTED)) {
+      counter++;
+  
+      syncPinStates();
+  
+      if(counter > 10) {
+        counter = 0;
+        syncPinModes();
+      }
     }
-    
-    syncPinStates();
-    
   }
 
-  delay(2000);
+  int i;
+  for (i = 0; i < MAX_GPIO; i++) {
+    if (pinRefs[i] != -1) {
+      int newStatus = readPin(i);
+      if(pinStatus[i] != newStatus + 1) {
+        // Status changed!
+        setPin(pinRefs[i], 255 - newStatus);
+        pinStatus[i] = newStatus + 1;
+      }
+    }
+  }
+
+  delay(LOOP_DELAY);
+  wait += LOOP_DELAY;
 }
 
 void debug(String payload) {
@@ -177,4 +214,23 @@ void debug(String payload) {
 #endif
 }
 
+void setPin(int pin, int val) {
+  pinStatus[pin] = val + 1;
+  if(val >= 255) {
+    digitalWrite(pin, HIGH);
+  } else if (val <= 0) {
+    digitalWrite(pin, LOW);
+  } else {
+    analogWrite(pin, val);
+  }
+}
+
+int readPin(int pin) {
+  int val = digitalRead(pin);
+
+  if (val == HIGH)
+    return 255;
+  else if (val == LOW)
+    return 0;
+}
 
