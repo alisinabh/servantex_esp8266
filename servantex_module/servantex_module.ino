@@ -53,8 +53,9 @@ void setPin(int, int);
 int readPin(int);
 
 void setup() {
-
+#ifdef DEBUG
   USE_SERIAL.begin(115200);
+#endif
 
   for (uint8_t t = 5; t > 0; t--) {
     delay(1000);
@@ -152,10 +153,16 @@ void syncPinStates() {
 
     int pinNumber = pin["p"];
     int srvStatus = pin["s"];
+ 
 
     if (pinStatus[i] - 1 != srvStatus) {
       // A change has been made from server
-      setPin(i, srvStatus);
+      int transition = pin["t"];
+      if(transition == 0)
+        setPin(i, srvStatus); 
+      else if(transition > 0 && transition < 500) {
+        setPinTransition(i, srvStatus, transition);
+      }
     }
   }
 }
@@ -253,6 +260,26 @@ void setPin(int pin, int val) {
   } else {
     analogWrite(pin, val);
   }
+}
+
+void setPinTransition(int pin, int val, int transDelay) {
+  int lastVal = pinStatus[pin] - 1;
+
+  int step;
+
+  if (lastVal > val) {
+    step = -2;
+  } else {
+    step = 2;
+  }
+
+  while (true) {
+    lastVal += step;
+    analogWrite(pin, lastVal);
+    delay(transDelay);
+  }
+  
+   pinStatus[pin] = val + 1;
 }
 
 int readPin(int pin) {
