@@ -9,42 +9,39 @@
 #include <Arduino.h>
 
 #include <ESP8266WiFi.h>
-#include <ESP8266WiFiMulti.h>
 
 #include <ESP8266HTTPClient.h>
 
 #include <ArduinoJson.h>
 
-#define WIFI_SSID         ""
-#define WIFI_PASSWORD     ""
-#define SERVICE_TOKEN     ""
+#define WIFI_SSID         "WIFI_SSID"
+#define WIFI_PASSWORD     "WIFI_PASSWORD"
+#define SERVICE_TOKEN     "SERVANTEX_THING_TOKEN"
 //#define HW_ID             ""
-#define DEBUG             1
+//#define DEBUG             1
 
-#define USE_SERIAL        Serial
+//#define USE_SERIAL        Serial
 
-#define SERVER_URL        "http://home.alisinabh.com/"
+#define SERVER_URL        "http://SERVER_URL/"
 //#define CERT_FINGERPRINT  ""
 
-#define PINMODE_URL       "api/pin_modes"
-#define SYNC_URL          "api/sync"
+#define PINMODE_URL       "thing_api/pin_modes"
+#define PUSH_URL          "thing_api/push"
+#define PULL_URL          "thing_api/pull"
 
-#define FW_VERSION        "0.0.1"
-#define MAX_GPIO          13
-#define LOOP_DELAY        50
+#define FW_VERSION        "1"
+#define MAX_GPIO          17
+#define LOOP_DELAY        100
 #define SYNC_DELAY        1500
-#define NOT_SET           0
-#define ON_HIGH           1
-#define OFF_LOW           2
+#define NOT_SET           -1
 
-const int PINMODE_STACK_SIZE = JSON_ARRAY_SIZE(13) + JSON_OBJECT_SIZE(1) + 13*JSON_OBJECT_SIZE(3) + 220;
-const int SYNC_STACK_SIZE    = JSON_ARRAY_SIZE(13) + JSON_OBJECT_SIZE(1) + 13*JSON_OBJECT_SIZE(3) + 220;
+const int PINMODE_STACK_SIZE = JSON_ARRAY_SIZE(12) + JSON_OBJECT_SIZE(1) + 13*JSON_OBJECT_SIZE(4) + 290;
+const int PULL_STACK_SIZE    = JSON_ARRAY_SIZE(12) + JSON_OBJECT_SIZE(1) + 13*JSON_OBJECT_SIZE(4) + 290;
 
 int pinStatus[MAX_GPIO];
 int pinRefs[MAX_GPIO];
 bool inputs[MAX_GPIO];
-
-ESP8266WiFiMulti WiFiMulti;
+bool gotPinModes = false;
 
 void syncPinModes();
 void syncPinStates();
@@ -52,22 +49,32 @@ void debug(String);
 void setPin(int, int);
 int readPin(int);
 
+HTTPClient http;
+
 void setup() {
 #ifdef DEBUG
   USE_SERIAL.begin(115200);
 #endif
 
+  debug("Servantex setup initiated!");
+
+  int i;
+  for (i = 0; i < MAX_GPIO; i++)
+    pinStatus[i] = NOT_SET;
+
+  
   for (uint8_t t = 5; t > 0; t--) {
     delay(1000);
   }
 
   WiFi.mode(WIFI_STA);
-  WiFiMulti.addAP(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  delay(5000);
+  debug("Servantex setup complete!");
 }
 
-int httpRequestJson(String relativeUrl, int isPost, String payload, int stackSize, JsonObject* &root) {
-   HTTPClient http;
-
+int httpRequest(String relativeUrl, int isPost, String payload, String *p_response) {
     debug("[HTTP] begin...\n");
 
     String url = SERVER_URL + relativeUrl;
@@ -78,14 +85,19 @@ int httpRequestJson(String relativeUrl, int isPost, String payload, int stackSiz
     http.begin(url);
 #endif
 
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
     http.addHeader("Authorization", SERVICE_TOKEN);
+    http.addHeader("servantex_fw", FW_VERSION);
 #ifdef HW_ID
     http.addHeader("Servantex-HWID", HW_ID);
 #else
     http.addHeader("Servantex-HWID", "MAC: " + WiFi.macAddress());
 #endif
 
-    debug("[HTTP] GET...\n");
+    http.setReuse(true);
+    http.setTimeout(5000);
+
+    debug("[HTTP] " + String(((isPost  == 1)? "POST": "GET")));
     // start connection and send HTTP header
     int httpCode;
     
@@ -98,24 +110,19 @@ int httpRequestJson(String relativeUrl, int isPost, String payload, int stackSiz
     // httpCode will be negative on error
     if (httpCode > 0) {
       // HTTP header has been send and Server response header has been handled
-      debug("[HTTP] GET... code:\n");
-      debug(httpCode + "");
+      debug("[HTTP] GET... code: " + String(httpCode));
 
       // file found at server
       if (httpCode == HTTP_CODE_OK) {
-        String payload = http.getString();
-        debug(payload);
-        
-        DynamicJsonBuffer jsonBuffer(stackSize);
+        String response = http.getString();
 
-        JsonObject& rootObj = jsonBuffer.parseObject(payload);
+        *p_response = response;
 
-        root = &rootObj;
+        debug("Got response.");
         
       } else {
         String payload = http.getString();
-        debug("HTTP ERROR");
-        debug(payload);
+        debug("HTTP ERROR: " + String(httpCode));
       }
     } else {
       debug("[HTTP] GET... failed, error:\n");
@@ -126,9 +133,60 @@ int httpRequestJson(String relativeUrl, int isPost, String payload, int stackSiz
     return httpCode;
 }
 
-void syncPinStates() {
+int httpRequestJson(String relativeUrl, int isPost, String payload, int stackSize, JsonObject* &root) {
+  
+  String response;
+  int httpCode = httpRequest(relativeUrl, isPost, payload, &response);
+
+  if(httpCode == HTTP_CODE_OK) {
+    debug("Got response, Deserialize...");
+  
+    DynamicJsonBuffer jsonBuffer(stackSize);
+  
+    JsonObject& rootObj = jsonBuffer.parseObject(response);
+  
+    root = &rootObj;
+    debug("Deserialize done");
+  }
+
+  return httpCode;
+}
+
+void pullPinStates() {
   JsonObject *root;
 
+  int httpCode = httpRequestJson(PULL_URL, 0, "", PULL_STACK_SIZE, root);
+
+  if(httpCode != 200 || !(*root).success()) {
+    debug("Error parsing json in sync");
+    return;
+  }
+
+  JsonArray& pinStatuses = (*root)["states"];
+
+  int i;
+  for (i = 0; i < pinStatuses.size(); i++) {
+    JsonObject& pin = pinStatuses[i];
+
+    int pinNumber = pin["p"];
+    int srvStatus = pin["s"];
+
+    if (!inputs[pinNumber] && pinStatus[pinNumber] != srvStatus) {
+      // A change has been made from server
+      debug("Change in pin" +  String(pinNumber) + " status: " + String(pinStatus[pinNumber]) + " server: " + String(srvStatus));
+      int transition = pin["t"];
+      if(transition == 0)
+        setPin(pinNumber, srvStatus); 
+      else if(transition > 0 && transition < 500) {
+        setPinTransition(pinNumber, srvStatus, transition);
+      }
+    }
+  }
+
+  debug("PULL complete");
+}
+
+void pushPinStates() {
   String payload = "";
 
   int i;
@@ -139,31 +197,13 @@ void syncPinStates() {
       payload += "&";
   }
 
-  int httpCode = httpRequestJson(SYNC_URL, 1, payload, SYNC_STACK_SIZE, root);
+  String result;
+  int httpCode = httpRequest(PUSH_URL, 1, payload, &result);
 
-  if(httpCode != 200 || !(*root).success()) {
-    debug("Error parsing json in sync");
-    return;
-  }
-
-  JsonArray& pinStatuses = (*root)["status"];
-
-  for (i = 0; i < sizeof(pinStatuses); i++) {
-    JsonObject& pin = pinStatuses[i];
-
-    int pinNumber = pin["p"];
-    int srvStatus = pin["s"];
- 
-
-    if (pinStatus[i] - 1 != srvStatus) {
-      // A change has been made from server
-      int transition = pin["t"];
-      if(transition == 0)
-        setPin(i, srvStatus); 
-      else if(transition > 0 && transition < 500) {
-        setPinTransition(i, srvStatus, transition);
-      }
-    }
+  if(httpCode != 200) {
+    debug("PUSH Error!");
+  } else {
+    debug("PUSH complete."); 
   }
 }
 
@@ -180,19 +220,29 @@ void syncPinModes() {
   JsonArray& pins = (*root)["pins"];
 
   int i;
-  for(i = 0; i < sizeof(pins); i++) {
+  for(i = 0; i < pins.size(); i++) {
     JsonObject& pin = pins[i];
     int pinNumber = pin["p"];
     if(pinNumber < MAX_GPIO) {
       if (pin["m"] == 1) {
         pinMode(pinNumber, OUTPUT);
+        debug("pin" + String(pinNumber) + " as output.");
+        
+        inputs[pinNumber] = false;
 
         if(pinStatus[pinNumber] == NOT_SET) {
-          setPin(pin["p"], pin["v"]);
+          int val = pin["v"];
+          setPin(pinNumber, val);
+          debug("Init pin" + String(pinNumber) + ": " + String(val));
         }
-      }
-      else if (pin["m"] == 2) {
-        pinMode(pinNumber, INPUT);
+      } else if (pin["m"] == 2 || pin["m"] == 3) {
+        if(pin["m"] == 2)
+          pinMode(pinNumber, INPUT);
+        else
+          pinMode(pinNumber, INPUT_PULLUP);
+          
+        debug("pin" + String(pinNumber) + " as input.");
+        
         inputs[pinNumber] = true;
 
         if(pin.containsKey("r")) {
@@ -206,18 +256,37 @@ void syncPinModes() {
       debug("GPIO pin Does not exist");
     }
   }
+
+  gotPinModes = true;
 }
 
 int counter = 0;
 int wait = 0;
+bool nextPull = true;
 void loop() {
   // wait for WiFi connection
   if(wait >= SYNC_DELAY) {
     wait = 0; // Reset wait
-    if ((WiFiMulti.run() == WL_CONNECTED)) {
+    if (WiFi.status() == WL_CONNECTED) {
       counter++;
-  
-      syncPinStates();
+
+      if(!gotPinModes) {
+        syncPinModes();
+        
+        delay(1000);
+
+        int j;
+        for (j = 0; j < MAX_GPIO; j++)
+          if(inputs[j])
+            pinStatus[j] = readPin(j);
+      }
+
+      if(nextPull)
+        pullPinStates();
+      else
+        nextPull = true;
+        
+      pushPinStates();
   
       if(counter > 10) {
         counter = 0;
@@ -231,13 +300,21 @@ void loop() {
     if(inputs[i]) {
       int newStatus = readPin(i);
       if (pinRefs[i] != -1) {
-        if(pinStatus[i] != newStatus + 1) {
+        if(pinStatus[i] != newStatus) {
           // Status changed!
           int lastRefPinState = pinStatus[pinRefs[i]];
-          setPin(pinRefs[i], 255 - lastRefPinState + 1);
+          int newState;
+          
+          if (lastRefPinState == 255)
+            newState = 0;
+          else
+            newState = 255;
+            
+          setPin(pinRefs[i], 255 - lastRefPinState);
+          nextPull = false;
         }
       }
-      pinStatus[i] = newStatus + 1;
+      pinStatus[i] = newStatus;
     }
   }
 
@@ -252,7 +329,7 @@ void debug(String payload) {
 }
 
 void setPin(int pin, int val) {
-  pinStatus[pin] = val + 1;
+  pinStatus[pin] = val;
   if(val >= 255) {
     digitalWrite(pin, HIGH);
   } else if (val <= 0) {
@@ -260,26 +337,33 @@ void setPin(int pin, int val) {
   } else {
     analogWrite(pin, val);
   }
+
+  debug("Set pin" + String(pin) + ": " + String(val));
 }
 
 void setPinTransition(int pin, int val, int transDelay) {
-  int lastVal = pinStatus[pin] - 1;
+  int lastVal = pinStatus[pin];
 
   int step;
 
   if (lastVal > val) {
-    step = -2;
+    step = -1;
   } else {
-    step = 2;
+    step = 1;
   }
 
   while (true) {
     lastVal += step;
+    
     analogWrite(pin, lastVal);
+      
     delay(transDelay);
+
+    if(lastVal == val)
+      break;
   }
   
-   pinStatus[pin] = val + 1;
+  pinStatus[pin] = lastVal;
 }
 
 int readPin(int pin) {
@@ -290,4 +374,3 @@ int readPin(int pin) {
   else if (val == LOW)
     return 0;
 }
-
