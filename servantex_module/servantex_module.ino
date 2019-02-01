@@ -79,6 +79,9 @@ int httpRequest(String relativeUrl, int isPost, String payload, String *p_respon
 
     String url = SERVER_URL + relativeUrl;
 
+    http.setReuse(true);
+    http.setTimeout(5000);
+
 #ifdef CERT_FINGERPRINT
     http.begin(url, CERT_FINGERPRINT);
 #else
@@ -93,9 +96,6 @@ int httpRequest(String relativeUrl, int isPost, String payload, String *p_respon
 #else
     http.addHeader("Servantex-HWID", "MAC: " + WiFi.macAddress());
 #endif
-
-    http.setReuse(true);
-    http.setTimeout(5000);
 
     debug("[HTTP] " + String(((isPost  == 1)? "POST": "GET")));
     // start connection and send HTTP header
