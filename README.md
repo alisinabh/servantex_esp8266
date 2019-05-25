@@ -1,5 +1,8 @@
 # Servantex implementation for ESP8266 (NodeMCU)
 
+**NOTE: This project is deprecated. Please do not use it.**
+
+
 Servantex is a home automation integration platform.
 
 Note: __THIS IS A WORK IN PROGRESS PROJECT__
